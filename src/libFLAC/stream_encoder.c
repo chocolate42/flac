@@ -4736,3 +4736,527 @@ FILE *get_binary_stdout_(void)
 
 	return stdout;
 }
+
+/* static encoder implementation*/
+FLAC_API FLAC__StaticEncoder *FLAC__static_encoder_new(void)
+{
+	FLAC__StaticEncoder *encoder;
+
+	FLAC__ASSERT(sizeof(int) >= 4); /* we want to die right away if this is not true */
+
+	encoder = calloc(1, sizeof(FLAC__StaticEncoder));
+	if(encoder == 0) {
+		return 0;
+	}
+
+	encoder->stream_encoder = FLAC__stream_encoder_new();
+	FLAC__stream_encoder_set_do_md5(encoder->stream_encoder, false);
+	return encoder;
+}
+
+FLAC_API void FLAC__static_encoder_delete(FLAC__StaticEncoder *encoder)
+{
+	if (encoder == NULL)
+		return ;
+
+	FLAC__stream_encoder_delete(encoder->stream_encoder);
+}
+
+static FLAC__StreamEncoderWriteStatus FLAC__static_dummy_write_callback (const FLAC__StreamEncoder *encoder, const FLAC__byte buffer[], size_t bytes, uint32_t samples, uint32_t current_frame, void *client_data)
+{
+	(void)encoder, (void)buffer, (void)bytes, (void)samples, (void)current_frame, (void)client_data;
+	return FLAC__STREAM_ENCODER_WRITE_STATUS_OK;
+}
+
+FLAC_API FLAC__StreamEncoderInitStatus FLAC__static_encoder_init(FLAC__StaticEncoder *encoder)
+{
+	return FLAC__stream_encoder_init_stream(encoder->stream_encoder, FLAC__static_dummy_write_callback, NULL, NULL, NULL, NULL);
+}
+
+/* Ideally we'd use process_subframes_ directly, but variable blocksize plumbing
+ * isn't present so we're going to hack it in here instead to avoid altering
+ * existing code. Changes marked with _CHANGE_ */
+static FLAC__bool process_subframes_static_(FLAC__StreamEncoder *encoder, uint64_t sample_number, int is_variable_blocksize)
+{
+	FLAC__FrameHeader frame_header;
+	uint32_t channel, min_partition_order = encoder->protected_->min_residual_partition_order, max_partition_order;
+	FLAC__bool do_independent, do_mid_side, backup_disable_constant_subframes = encoder->private_->disable_constant_subframes, all_subframes_constant = true;
+
+	/*
+	 * Calculate the min,max Rice partition orders
+	 */
+
+	max_partition_order = FLAC__format_get_max_rice_partition_order_from_blocksize(encoder->protected_->blocksize);
+	max_partition_order = flac_min(max_partition_order, encoder->protected_->max_residual_partition_order);
+	min_partition_order = flac_min(min_partition_order, max_partition_order);
+
+	/*
+	 * Setup the frame
+	 */
+	frame_header.blocksize = encoder->protected_->blocksize;
+	frame_header.sample_rate = encoder->protected_->sample_rate;
+	frame_header.channels = encoder->protected_->channels;
+	frame_header.channel_assignment = FLAC__CHANNEL_ASSIGNMENT_INDEPENDENT; /* the default unless the encoder determines otherwise */
+	frame_header.bits_per_sample = encoder->protected_->bits_per_sample;
+
+	/* _CHANGE_ This is the only change to get the writer to set the blocking strategy appropriately and write sample number instead of frame number
+	 * A proper implementation would have this variable in stream encoder struct etc */
+	if(is_variable_blocksize){
+		frame_header.number_type = FLAC__FRAME_NUMBER_TYPE_SAMPLE_NUMBER;
+		frame_header.number.sample_number = sample_number;
+	}
+	else{
+		frame_header.number_type = FLAC__FRAME_NUMBER_TYPE_FRAME_NUMBER;
+		frame_header.number.frame_number = encoder->private_->current_frame_number;
+	}
+
+	/*
+	 * Figure out what channel assignments to try
+	 */
+	if(encoder->protected_->do_mid_side_stereo) {
+		if(encoder->protected_->loose_mid_side_stereo) {
+			if(encoder->private_->loose_mid_side_stereo_frame_count == 0) {
+				do_independent = true;
+				do_mid_side = true;
+			}
+			else {
+				do_independent = (encoder->private_->last_channel_assignment == FLAC__CHANNEL_ASSIGNMENT_INDEPENDENT);
+				do_mid_side = !do_independent;
+			}
+		}
+		else {
+			do_independent = true;
+			do_mid_side = true;
+		}
+	}
+	else {
+		do_independent = true;
+		do_mid_side = false;
+	}
+
+	FLAC__ASSERT(do_independent || do_mid_side);
+
+	/*
+	 * Check for wasted bits; set effective bps for each subframe
+	 */
+	if(do_independent) {
+		for(channel = 0; channel < encoder->protected_->channels; channel++) {
+			uint32_t w = get_wasted_bits_(encoder->private_->integer_signal[channel], encoder->protected_->blocksize);
+			if (w > encoder->protected_->bits_per_sample) {
+				w = encoder->protected_->bits_per_sample;
+			}
+			encoder->private_->subframe_workspace[channel][0].wasted_bits = encoder->private_->subframe_workspace[channel][1].wasted_bits = w;
+			encoder->private_->subframe_bps[channel] = encoder->protected_->bits_per_sample - w;
+		}
+	}
+	if(do_mid_side) {
+		FLAC__ASSERT(encoder->protected_->channels == 2);
+		for(channel = 0; channel < 2; channel++) {
+			uint32_t w;
+			if(encoder->protected_->bits_per_sample < 32 || channel == 0)
+				w = get_wasted_bits_(encoder->private_->integer_signal_mid_side[channel], encoder->protected_->blocksize);
+			else
+				w = get_wasted_bits_wide_(encoder->private_->integer_signal_33bit_side, encoder->private_->integer_signal_mid_side[channel], encoder->protected_->blocksize);
+
+			if (w > encoder->protected_->bits_per_sample) {
+				w = encoder->protected_->bits_per_sample;
+			}
+			encoder->private_->subframe_workspace_mid_side[channel][0].wasted_bits = encoder->private_->subframe_workspace_mid_side[channel][1].wasted_bits = w;
+			encoder->private_->subframe_bps_mid_side[channel] = encoder->protected_->bits_per_sample - w + (channel==0? 0:1);
+		}
+	}
+
+	/*
+	 * First do a normal encoding pass of each independent channel
+	 */
+	if(do_independent) {
+		for(channel = 0; channel < encoder->protected_->channels; channel++) {
+			if(encoder->protected_->limit_min_bitrate && all_subframes_constant && (channel + 1) == encoder->protected_->channels){
+				/* This frame contains only constant subframes at this point.
+				 * To prevent the frame from becoming too small, make sure
+				 * the last subframe isn't constant */
+				encoder->private_->disable_constant_subframes = true;
+			}
+			if(!
+				process_subframe_(
+					encoder,
+					min_partition_order,
+					max_partition_order,
+					&frame_header,
+					encoder->private_->subframe_bps[channel],
+					encoder->private_->integer_signal[channel],
+					encoder->private_->subframe_workspace_ptr[channel],
+					encoder->private_->partitioned_rice_contents_workspace_ptr[channel],
+					encoder->private_->residual_workspace[channel],
+					encoder->private_->best_subframe+channel,
+					encoder->private_->best_subframe_bits+channel
+				)
+			)
+				return false;
+			if(encoder->private_->subframe_workspace[channel][encoder->private_->best_subframe[channel]].type != FLAC__SUBFRAME_TYPE_CONSTANT)
+				all_subframes_constant = false;
+		}
+	}
+
+	/*
+	 * Now do mid and side channels if requested
+	 */
+	if(do_mid_side) {
+		FLAC__ASSERT(encoder->protected_->channels == 2);
+
+		for(channel = 0; channel < 2; channel++) {
+			void *integer_signal_;
+			if(encoder->private_->subframe_bps_mid_side[channel] <= 32)
+				integer_signal_ = encoder->private_->integer_signal_mid_side[channel];
+			else
+				integer_signal_ = encoder->private_->integer_signal_33bit_side;
+			if(!
+				process_subframe_(
+					encoder,
+					min_partition_order,
+					max_partition_order,
+					&frame_header,
+					encoder->private_->subframe_bps_mid_side[channel],
+					integer_signal_,
+					encoder->private_->subframe_workspace_ptr_mid_side[channel],
+					encoder->private_->partitioned_rice_contents_workspace_ptr_mid_side[channel],
+					encoder->private_->residual_workspace_mid_side[channel],
+					encoder->private_->best_subframe_mid_side+channel,
+					encoder->private_->best_subframe_bits_mid_side+channel
+				)
+			)
+				return false;
+		}
+	}
+
+	/*
+	 * Compose the frame bitbuffer
+	 */
+	if(do_mid_side) {
+		uint32_t left_bps = 0, right_bps = 0; /* initialized only to prevent superfluous compiler warning */
+		FLAC__Subframe *left_subframe = 0, *right_subframe = 0; /* initialized only to prevent superfluous compiler warning */
+		FLAC__ChannelAssignment channel_assignment;
+
+		FLAC__ASSERT(encoder->protected_->channels == 2);
+
+		if(encoder->protected_->loose_mid_side_stereo && encoder->private_->loose_mid_side_stereo_frame_count > 0) {
+			channel_assignment = (encoder->private_->last_channel_assignment == FLAC__CHANNEL_ASSIGNMENT_INDEPENDENT? FLAC__CHANNEL_ASSIGNMENT_INDEPENDENT : FLAC__CHANNEL_ASSIGNMENT_MID_SIDE);
+		}
+		else {
+			uint32_t bits[4]; /* WATCHOUT - indexed by FLAC__ChannelAssignment */
+			uint32_t min_bits;
+			int ca;
+
+			FLAC__ASSERT(FLAC__CHANNEL_ASSIGNMENT_INDEPENDENT == 0);
+			FLAC__ASSERT(FLAC__CHANNEL_ASSIGNMENT_LEFT_SIDE   == 1);
+			FLAC__ASSERT(FLAC__CHANNEL_ASSIGNMENT_RIGHT_SIDE  == 2);
+			FLAC__ASSERT(FLAC__CHANNEL_ASSIGNMENT_MID_SIDE    == 3);
+			FLAC__ASSERT(do_independent && do_mid_side);
+
+			/* We have to figure out which channel assignent results in the smallest frame */
+			bits[FLAC__CHANNEL_ASSIGNMENT_INDEPENDENT] = encoder->private_->best_subframe_bits         [0] + encoder->private_->best_subframe_bits         [1];
+			bits[FLAC__CHANNEL_ASSIGNMENT_LEFT_SIDE  ] = encoder->private_->best_subframe_bits         [0] + encoder->private_->best_subframe_bits_mid_side[1];
+			bits[FLAC__CHANNEL_ASSIGNMENT_RIGHT_SIDE ] = encoder->private_->best_subframe_bits         [1] + encoder->private_->best_subframe_bits_mid_side[1];
+			bits[FLAC__CHANNEL_ASSIGNMENT_MID_SIDE   ] = encoder->private_->best_subframe_bits_mid_side[0] + encoder->private_->best_subframe_bits_mid_side[1];
+
+			channel_assignment = FLAC__CHANNEL_ASSIGNMENT_INDEPENDENT;
+			min_bits = bits[channel_assignment];
+
+			/* When doing loose mid-side stereo, ignore left-side
+			 * and right-side options */
+			ca = encoder->protected_->loose_mid_side_stereo ? 3 : 1;
+			for( ; ca <= 3; ca++) {
+				if(bits[ca] < min_bits) {
+					min_bits = bits[ca];
+					channel_assignment = (FLAC__ChannelAssignment)ca;
+				}
+			}
+		}
+
+		frame_header.channel_assignment = channel_assignment;
+
+		if(!FLAC__frame_add_header(&frame_header, encoder->private_->frame)) {
+			encoder->protected_->state = FLAC__STREAM_ENCODER_FRAMING_ERROR;
+			return false;
+		}
+
+		switch(channel_assignment) {
+			case FLAC__CHANNEL_ASSIGNMENT_INDEPENDENT:
+				left_subframe  = &encoder->private_->subframe_workspace         [0][encoder->private_->best_subframe         [0]];
+				right_subframe = &encoder->private_->subframe_workspace         [1][encoder->private_->best_subframe         [1]];
+				break;
+			case FLAC__CHANNEL_ASSIGNMENT_LEFT_SIDE:
+				left_subframe  = &encoder->private_->subframe_workspace         [0][encoder->private_->best_subframe         [0]];
+				right_subframe = &encoder->private_->subframe_workspace_mid_side[1][encoder->private_->best_subframe_mid_side[1]];
+				break;
+			case FLAC__CHANNEL_ASSIGNMENT_RIGHT_SIDE:
+				left_subframe  = &encoder->private_->subframe_workspace_mid_side[1][encoder->private_->best_subframe_mid_side[1]];
+				right_subframe = &encoder->private_->subframe_workspace         [1][encoder->private_->best_subframe         [1]];
+				break;
+			case FLAC__CHANNEL_ASSIGNMENT_MID_SIDE:
+				left_subframe  = &encoder->private_->subframe_workspace_mid_side[0][encoder->private_->best_subframe_mid_side[0]];
+				right_subframe = &encoder->private_->subframe_workspace_mid_side[1][encoder->private_->best_subframe_mid_side[1]];
+				break;
+			default:
+				FLAC__ASSERT(0);
+		}
+
+		switch(channel_assignment) {
+			case FLAC__CHANNEL_ASSIGNMENT_INDEPENDENT:
+				left_bps  = encoder->private_->subframe_bps         [0];
+				right_bps = encoder->private_->subframe_bps         [1];
+				break;
+			case FLAC__CHANNEL_ASSIGNMENT_LEFT_SIDE:
+				left_bps  = encoder->private_->subframe_bps         [0];
+				right_bps = encoder->private_->subframe_bps_mid_side[1];
+				break;
+			case FLAC__CHANNEL_ASSIGNMENT_RIGHT_SIDE:
+				left_bps  = encoder->private_->subframe_bps_mid_side[1];
+				right_bps = encoder->private_->subframe_bps         [1];
+				break;
+			case FLAC__CHANNEL_ASSIGNMENT_MID_SIDE:
+				left_bps  = encoder->private_->subframe_bps_mid_side[0];
+				right_bps = encoder->private_->subframe_bps_mid_side[1];
+				break;
+			default:
+				FLAC__ASSERT(0);
+		}
+
+		/* note that encoder_add_subframe_ sets the state for us in case of an error */
+		if(!add_subframe_(encoder, frame_header.blocksize, left_bps , left_subframe , encoder->private_->frame))
+			return false;
+		if(!add_subframe_(encoder, frame_header.blocksize, right_bps, right_subframe, encoder->private_->frame))
+			return false;
+	}
+	else {
+		if(!FLAC__frame_add_header(&frame_header, encoder->private_->frame)) {
+			encoder->protected_->state = FLAC__STREAM_ENCODER_FRAMING_ERROR;
+			return false;
+		}
+
+		for(channel = 0; channel < encoder->protected_->channels; channel++) {
+			if(!add_subframe_(encoder, frame_header.blocksize, encoder->private_->subframe_bps[channel], &encoder->private_->subframe_workspace[channel][encoder->private_->best_subframe[channel]], encoder->private_->frame)) {
+				/* the above function sets the state for us in case of an error */
+				return false;
+			}
+		}
+	}
+
+	if(encoder->protected_->loose_mid_side_stereo) {
+		encoder->private_->loose_mid_side_stereo_frame_count++;
+		if(encoder->private_->loose_mid_side_stereo_frame_count >= encoder->private_->loose_mid_side_stereo_frames)
+			encoder->private_->loose_mid_side_stereo_frame_count = 0;
+	}
+
+	encoder->private_->last_channel_assignment = frame_header.channel_assignment;
+	encoder->private_->disable_constant_subframes = backup_disable_constant_subframes;
+
+	return true;
+}
+
+/* copy of process_frame_ with the bits we don't want for a StaticEncoder removed */
+static FLAC__bool process_frame_static_(FLAC__StreamEncoder *encoder, uint64_t sample_number, void *outbuf, size_t *outbuf_size, int is_variable_blocksize)
+{
+	FLAC__uint16 crc;
+	FLAC__ASSERT(encoder->protected_->state == FLAC__STREAM_ENCODER_OK);
+
+	/*
+	 * Process the frame header and subframes into the frame bitbuffer
+	 */
+	if(!process_subframes_static_(encoder, sample_number, is_variable_blocksize)) {
+		/* the above function sets the state for us in case of an error */
+		return false;
+	}
+
+	/*
+	 * Zero-pad the frame to a byte_boundary
+	 */
+	if(!FLAC__bitwriter_zero_pad_to_byte_boundary(encoder->private_->frame)) {
+		encoder->protected_->state = FLAC__STREAM_ENCODER_MEMORY_ALLOCATION_ERROR;
+		return false;
+	}
+
+	/*
+	 * CRC-16 the whole thing
+	 */
+	FLAC__ASSERT(FLAC__bitwriter_is_byte_aligned(encoder->private_->frame));
+	if(
+		!FLAC__bitwriter_get_write_crc16(encoder->private_->frame, &crc) ||
+		!FLAC__bitwriter_write_raw_uint32(encoder->private_->frame, crc, FLAC__FRAME_FOOTER_CRC_LEN)
+	) {
+		encoder->protected_->state = FLAC__STREAM_ENCODER_MEMORY_ALLOCATION_ERROR;
+		return false;
+	}
+
+	/*
+	 * "Write"
+	 */
+	if(!FLAC__bitwriter_get_buffer(encoder->private_->frame, outbuf, outbuf_size)) {
+		encoder->protected_->state = FLAC__STREAM_ENCODER_MEMORY_ALLOCATION_ERROR;
+		return false;
+	}
+	if(*outbuf_size==0){
+		return false;
+	}
+
+	encoder->private_->current_sample_number = 0;
+	FLAC__bitwriter_clear(encoder->private_->frame);//convenient to do it here
+
+	return true;
+}
+
+FLAC_API FLAC__bool FLAC__static_encoder_process_frame_interleaved(FLAC__StaticEncoder *static_encoder, const void *inbuf, uint32_t samples, uint64_t current_sample, void *outbuf, size_t *outbuf_size){
+	uint32_t i=0, k=0, channel;
+	const FLAC__int32 *buffer=(FLAC__int32*)inbuf;
+	const uint32_t channels = static_encoder->stream_encoder->protected_->channels, bps = static_encoder->stream_encoder->protected_->bits_per_sample;
+	const FLAC__int32 sample_max = INT32_MAX >> (32 - static_encoder->stream_encoder->protected_->bits_per_sample);
+	const FLAC__int32 sample_min = INT32_MIN >> (32 - static_encoder->stream_encoder->protected_->bits_per_sample);
+	FLAC__StreamEncoder *encoder = static_encoder->stream_encoder;
+
+	FLAC__ASSERT(0 != static_encoder);
+	FLAC__ASSERT(0 != encoder);
+	FLAC__ASSERT(0 != encoder->private_);
+	FLAC__ASSERT(0 != encoder->protected_);
+	FLAC__ASSERT(samples <= encoder->protected_->blocksize);
+	FLAC__ASSERT(0 == encoder->private_->current_sample_number); /* If this is non-zero the wrapped stream has been tampered with */
+
+	encoder->private_->current_frame_number=current_sample/encoder->protected_->blocksize;
+
+	if(encoder->protected_->state != FLAC__STREAM_ENCODER_OK){
+		return false;
+	}
+
+	i = k = 0;
+	/*
+	 * we have several flavors of the same basic loop, optimized for
+	 * different conditions:
+	 */
+	if(encoder->protected_->do_mid_side_stereo && channels == 2) {
+		/*
+		 * stereo coding: unroll channel loop
+		 */
+		if(encoder->protected_->verify)
+			append_to_verify_fifo_interleaved_(&encoder->private_->verify.input_fifo, buffer, 0, channels, samples);
+
+		for(i = 0; i <samples; i++) {
+			if(buffer[k]   < sample_min || buffer[k]   > sample_max ||
+			   buffer[k+1] < sample_min || buffer[k+1] > sample_max){
+				encoder->protected_->state = FLAC__STREAM_ENCODER_CLIENT_ERROR;
+				return false;
+			}
+			encoder->private_->integer_signal[0][i] = buffer[k++];
+			encoder->private_->integer_signal[1][i] = buffer[k++];
+			if(bps < 32){
+				encoder->private_->integer_signal_mid_side[1][i] = encoder->private_->integer_signal[0][i] - encoder->private_->integer_signal[1][i];
+				encoder->private_->integer_signal_mid_side[0][i] = (encoder->private_->integer_signal[0][i] + encoder->private_->integer_signal[1][i]) >> 1;
+			}
+			else {
+				encoder->private_->integer_signal_33bit_side[i] = (FLAC__int64)encoder->private_->integer_signal[0][i] - (FLAC__int64)encoder->private_->integer_signal[1][i];
+				encoder->private_->integer_signal_mid_side[0][i] = ((FLAC__int64)encoder->private_->integer_signal[0][i] + (FLAC__int64)encoder->private_->integer_signal[1][i]) >> 1;
+			}
+		}
+	}
+	else {
+		/*
+		 * independent channel coding: buffer each channel in inner loop
+		 */
+		if(encoder->protected_->verify)
+			append_to_verify_fifo_interleaved_(&encoder->private_->verify.input_fifo, buffer, 0, channels, samples);
+
+		for(i = 0; i < samples; i++) {
+			for(channel = 0; channel < channels; channel++){
+				if(buffer[k] < sample_min || buffer[k] > sample_max){
+					encoder->protected_->state = FLAC__STREAM_ENCODER_CLIENT_ERROR;
+					return false;
+				}
+				encoder->private_->integer_signal[channel][i] = buffer[k++];
+			}
+		}
+	}
+	encoder->private_->current_sample_number = i;
+	/* Always encode what we have as a frame, present samples can only be less than a frame when we encode the last frame */
+	if(encoder->protected_->blocksize != encoder->private_->current_sample_number) {/* last frame needs some messing about, taken from stream_encoder_finish */
+		encoder->protected_->blocksize = encoder->private_->current_sample_number;
+		if(!resize_buffers_(encoder, encoder->protected_->blocksize)) {
+			/* the above function sets the state for us in case of an error */
+			return false;
+		}
+	}
+	if(!process_frame_static_(encoder, current_sample, outbuf, outbuf_size, static_encoder->is_variable_blocksize)){
+		return false;
+	}
+
+	return true;
+}
+
+FLAC_API FLAC__bool FLAC__static_encoder_process_frame_bps16_interleaved(FLAC__StaticEncoder *static_encoder, const void *inbuf, uint32_t samples, uint64_t current_sample, void *outbuf, size_t *outbuf_size){
+	uint32_t i=0, k=0, channel;
+	const FLAC__int16 *buffer=(FLAC__int16*)inbuf;
+	const uint32_t channels = static_encoder->stream_encoder->protected_->channels;
+	FLAC__StreamEncoder *encoder = static_encoder->stream_encoder;
+
+	FLAC__ASSERT(0 != static_encoder);
+	FLAC__ASSERT(0 != encoder);
+	FLAC__ASSERT(0 != encoder->private_);
+	FLAC__ASSERT(0 != encoder->protected_);
+	FLAC__ASSERT(samples <= encoder->protected_->blocksize);
+	FLAC__ASSERT(0 == encoder->private_->current_sample_number); /* If this is non-zero the wrapped stream has been tampered with */
+
+	encoder->private_->current_frame_number=current_sample/encoder->protected_->blocksize;
+
+	if(encoder->protected_->state != FLAC__STREAM_ENCODER_OK){
+		return false;
+	}
+
+	i = k = 0;
+	/*
+	 * we have several flavors of the same basic loop, optimized for
+	 * different conditions:
+	 */
+	if(encoder->protected_->do_mid_side_stereo && channels == 2) {
+		/*
+		 * stereo coding: unroll channel loop
+		 */
+		//if(encoder->protected_->verify)
+		//	append_to_verify_fifo_interleaved_(&encoder->private_->verify.input_fifo, buffer, 0, channels, samples);
+
+		for(i = 0; i <samples; i++) {
+			encoder->private_->integer_signal[0][i] = buffer[k++];
+			encoder->private_->integer_signal[1][i] = buffer[k++];
+			encoder->private_->integer_signal_mid_side[1][i] = encoder->private_->integer_signal[0][i] - encoder->private_->integer_signal[1][i];
+			encoder->private_->integer_signal_mid_side[0][i] = (encoder->private_->integer_signal[0][i] + encoder->private_->integer_signal[1][i]) >> 1;
+		}
+	}
+	else {
+		/*
+		 * independent channel coding: buffer each channel in inner loop
+		 */
+		//if(encoder->protected_->verify)
+		//	append_to_verify_fifo_interleaved_(&encoder->private_->verify.input_fifo, buffer, 0, channels, samples);
+
+		for(i = 0; i < samples; i++) {
+			for(channel = 0; channel < channels; channel++){
+				encoder->private_->integer_signal[channel][i] = buffer[k++];
+			}
+		}
+	}
+	encoder->private_->current_sample_number = i;
+	/* Always encode what we have as a frame, present samples can only be less than a frame when we encode the last frame */
+	if(encoder->protected_->blocksize != encoder->private_->current_sample_number) {/* last frame needs some messing about, taken from stream_encoder_finish */
+		encoder->protected_->blocksize = encoder->private_->current_sample_number;
+		if(!resize_buffers_(encoder, encoder->protected_->blocksize)) {
+			/* the above function sets the state for us in case of an error */
+			return false;
+		}
+	}
+	if(!process_frame_static_(encoder, current_sample, outbuf, outbuf_size, static_encoder->is_variable_blocksize)){
+		return false;
+	}
+
+	return true;
+}
+
+FLAC_API FLAC__StreamEncoder *FLAC__static_encoder_get_underlying_stream(FLAC__StaticEncoder *encoder)
+{
+	return encoder->stream_encoder;
+}

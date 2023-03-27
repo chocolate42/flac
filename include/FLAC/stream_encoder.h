@@ -1828,6 +1828,20 @@ FLAC_API FLAC__bool FLAC__stream_encoder_process(FLAC__StreamEncoder *encoder, c
  */
 FLAC_API FLAC__bool FLAC__stream_encoder_process_interleaved(FLAC__StreamEncoder *encoder, const FLAC__int32 buffer[], uint32_t samples);
 
+/* static encoder */
+typedef struct {
+	FLAC__StreamEncoder *stream_encoder;/* should be protected? */
+	int is_variable_blocksize; /* hack in variable blocksize */
+} FLAC__StaticEncoder;
+
+FLAC_API FLAC__StaticEncoder *FLAC__static_encoder_new(void);
+FLAC_API void FLAC__static_encoder_delete(FLAC__StaticEncoder *encoder);
+FLAC_API FLAC__StreamEncoderInitStatus FLAC__static_encoder_init(FLAC__StaticEncoder *encoder);
+FLAC_API FLAC__StreamEncoder *FLAC__static_encoder_get_underlying_stream(FLAC__StaticEncoder *encoder);/* for if stream protected */
+FLAC_API FLAC__bool FLAC__static_encoder_process_frame_interleaved(FLAC__StaticEncoder *encoder, const void *inbuf, uint32_t samples, uint64_t current_sample, void *outbuf, size_t *outbuf_size);
+FLAC_API FLAC__bool FLAC__static_encoder_process_frame_bps16_interleaved(FLAC__StaticEncoder *static_encoder, const void *inbuf, uint32_t samples, uint64_t current_sample, void *outbuf, size_t *outbuf_size);
+/* end of static encoder */
+
 /* \} */
 
 #ifdef __cplusplus
