@@ -1361,6 +1361,9 @@ static FLAC__StreamEncoderInitStatus init_FILE_internal_(
 	 */
 	if(GetFileType((HANDLE)_get_osfhandle(_fileno(file))) == FILE_TYPE_DISK)
 		setvbuf(file, NULL, _IOFBF, 10*1024*1024);
+#else
+		char *hack=malloc((10*1024*1024)+8);
+		setvbuf(file, hack, _IOFBF, (10*1024*1024)+8);
 #endif
 	encoder->private_->file = file;
 
