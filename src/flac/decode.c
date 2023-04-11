@@ -268,6 +268,8 @@ FLAC__bool DecoderSession_construct(DecoderSession *d, FLAC__bool is_ogg, FLAC__
 				return false;
 			}
 		}
+		char *hack=malloc((10*1024*1024)+8);
+		setvbuf(d->fout, hack, _IOFBF, (10*1024*1024)+8);
 	}
 
 	if(analysis_mode)
