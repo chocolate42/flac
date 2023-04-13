@@ -90,6 +90,11 @@ typedef struct {
 	FLAC__StreamDecoder *decoder;
 
 	FILE *fout;
+//_WIN32_internal_buffer_version
+#if 0
+#else
+	void *output_buffer;
+#endif
 
 	foreign_metadata_t *foreign_metadata; /* NULL unless --keep-foreign-metadata requested */
 	FLAC__off_t fm_offset1, fm_offset2, fm_offset3;
@@ -267,9 +272,14 @@ FLAC__bool DecoderSession_construct(DecoderSession *d, FLAC__bool is_ogg, FLAC__
 				DecoderSession_destroy(d, /*error_occurred=*/true);
 				return false;
 			}
+//_WIN32_internal_buffer_version
+#if 0
+			setvbuf(d->fout, NULL, _IOFBF, 10*1024*1024);
+#else
+			d->output_buffer=malloc(10*1024*1024);
+			setvbuf(d->fout, d->output_buffer, _IOFBF, 10*1024*1024);
+#endif
 		}
-		char *hack=malloc((10*1024*1024)+8);
-		setvbuf(d->fout, hack, _IOFBF, (10*1024*1024)+8);
 	}
 
 	if(analysis_mode)
@@ -299,6 +309,11 @@ void DecoderSession_destroy(DecoderSession *d, FLAC__bool error_occurred)
 		}
 #endif
 		fclose(d->fout);
+//_WIN32_internal_buffer_version
+#if 0
+#else
+		free(d->output_buffer);
+#endif
 		if(error_occurred)
 			flac_unlink(d->outfilename);
 	}
