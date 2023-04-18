@@ -407,11 +407,6 @@ typedef struct FLAC__StreamEncoderPrivate {
 	void *client_data;
 	uint32_t first_seekpoint_to_check;
 	FILE *file;                            /* only used when encoding to a file */
-//_WIN32_internal_buffer_version
-#if 0
-#else
-	void *output_buffer; /*external output buffer used by fwrite */
-#endif
 	FLAC__uint64 bytes_written;
 	FLAC__uint64 samples_written;
 	uint32_t frames_written;
@@ -1359,19 +1354,13 @@ static FLAC__StreamEncoderInitStatus init_FILE_internal_(
 	if(file == stdout)
 		file = get_binary_stdout_(); /* just to be safe */
 
-//_WIN32_internal_buffer_version
-#if 0
+#ifdef _WIN32
 	/*
 	 * Windows can suffer quite badly from disk fragmentation. This can be
 	 * reduced significantly by setting the output buffer size to be 10MB.
 	 */
 	if(GetFileType((HANDLE)_get_osfhandle(_fileno(file))) == FILE_TYPE_DISK)
 		setvbuf(file, NULL, _IOFBF, 10*1024*1024);
-#else
-	if(file != stdout) {
-		encoder->private_->output_buffer=malloc(10*1024*1024);
-		setvbuf(file, encoder->private_->output_buffer, _IOFBF, 10*1024*1024);
-	}
 #endif
 	encoder->private_->file = file;
 
@@ -1493,12 +1482,8 @@ FLAC_API FLAC__bool FLAC__stream_encoder_finish(FLAC__StreamEncoder *encoder)
 		}
 		if(0 != encoder->private_->file) {
 			if(encoder->private_->file != stdout) {
+				//fsync(fileno(encoder->private_->file));
 				fclose(encoder->private_->file);
-//_WIN32_internal_buffer_version
-#if 0
-#else
-				free(encoder->private_->output_buffer);
-#endif
 			}
 			encoder->private_->file = 0;
 		}
@@ -1547,13 +1532,9 @@ FLAC_API FLAC__bool FLAC__stream_encoder_finish(FLAC__StreamEncoder *encoder)
 
 	if(0 != encoder->private_->file) {
 		if(encoder->private_->file != stdout) {
+			//fsync(fileno(encoder->private_->file));
 			fclose(encoder->private_->file);
-//_WIN32_internal_buffer_version
-#if 0
-#else
-			free(encoder->private_->output_buffer);
-#endif
-			}
+		}
 		encoder->private_->file = 0;
 	}
 

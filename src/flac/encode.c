@@ -113,6 +113,13 @@ typedef struct {
 
 	FLAC__StreamEncoder *encoder;
 
+	FILE *fout;
+//_WIN32_internal_buffer_version
+#if 0
+#else
+	void *output_buffer;
+#endif
+
 	FILE *fin;
 	FLAC__StreamMetadata *seek_table_template;
 	double progress, compression_ratio;
@@ -1478,6 +1485,7 @@ FLAC__bool EncoderSession_construct(EncoderSession *e, encode_options_t options,
 
 	e->is_stdout = (0 == strcmp(outfilename, "-"));
 	e->outputfile_opened = false;
+	e->output_buffer = 0;
 
 	e->inbasefilename = grabbag__file_get_basename(infilename);
 	e->infilename = infilename;
@@ -1568,6 +1576,11 @@ void EncoderSession_destroy(EncoderSession *e)
 	if(0 != e->seek_table_template) {
 		FLAC__metadata_object_delete(e->seek_table_template);
 		e->seek_table_template = 0;
+	}
+
+	if(e->output_buffer) {
+		free(e->output_buffer);
+		e->output_buffer = 0;
 	}
 }
 
@@ -2115,16 +2128,28 @@ FLAC__bool EncoderSession_init_encoder(EncoderSession *e, encode_options_t optio
 		}
 	}
 
+	e->fout = e->is_stdout? stdout : flac_fopen(e->outfilename, "w+b");
+
+//_WIN32_internal_buffer_version
+#if 0
+	setvbuf(e->fout, NULL, _IOFBF, 10*1024*1024);
+#else
+	if(!e->is_stdout) {
+		e->output_buffer=malloc(10*1024*1024);
+		setvbuf(e->fout, e->output_buffer, _IOFBF, 10*1024*1024);
+	}
+#endif
+
 #if FLAC__HAS_OGG
 	if(e->use_ogg) {
 		FLAC__stream_encoder_set_ogg_serial_number(e->encoder, options.serial_number);
 
-		init_status = FLAC__stream_encoder_init_ogg_file(e->encoder, e->is_stdout? 0 : e->outfilename, encoder_progress_callback, /*client_data=*/e);
+		init_status = FLAC__stream_encoder_init_ogg_FILE(e->encoder, e->fout, encoder_progress_callback, /*client_data=*/e);
 	}
 	else
 #endif
 	{
-		init_status = FLAC__stream_encoder_init_file(e->encoder, e->is_stdout? 0 : e->outfilename, encoder_progress_callback, /*client_data=*/e);
+		init_status = FLAC__stream_encoder_init_FILE(e->encoder, e->fout, encoder_progress_callback, /*client_data=*/e);
 	}
 
 	if(init_status != FLAC__STREAM_ENCODER_INIT_STATUS_OK) {

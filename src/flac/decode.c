@@ -308,6 +308,7 @@ void DecoderSession_destroy(DecoderSession *d, FLAC__bool error_occurred)
 			}
 		}
 #endif
+		//fsync(fileno(d->fout));
 		fclose(d->fout);
 //_WIN32_internal_buffer_version
 #if 0
