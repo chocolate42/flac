@@ -255,6 +255,11 @@ FLAC__bool DecoderSession_construct(DecoderSession *d, FLAC__bool is_ogg, FLAC__
 	d->decoder = 0;
 
 	d->fout = 0; /* initialized with an open file later if necessary */
+//_WIN32_internal_buffer_version
+#if 0
+#else
+	d->output_buffer = 0;
+#endif
 
 	d->foreign_metadata = foreign_metadata;
 
@@ -308,12 +313,14 @@ void DecoderSession_destroy(DecoderSession *d, FLAC__bool error_occurred)
 			}
 		}
 #endif
-		//fsync(fileno(d->fout));
 		fclose(d->fout);
 //_WIN32_internal_buffer_version
 #if 0
 #else
-		free(d->output_buffer);
+		if(d->output_buffer) {
+			free(d->output_buffer);
+			d->output_buffer = 0;
+		}
 #endif
 		if(error_occurred)
 			flac_unlink(d->outfilename);
