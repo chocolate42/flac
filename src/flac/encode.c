@@ -1485,7 +1485,11 @@ FLAC__bool EncoderSession_construct(EncoderSession *e, encode_options_t options,
 
 	e->is_stdout = (0 == strcmp(outfilename, "-"));
 	e->outputfile_opened = false;
+//_WIN32_internal_buffer_version
+#if 0
+#else
 	e->output_buffer = 0;
+#endif
 
 	e->inbasefilename = grabbag__file_get_basename(infilename);
 	e->infilename = infilename;
@@ -1577,11 +1581,14 @@ void EncoderSession_destroy(EncoderSession *e)
 		FLAC__metadata_object_delete(e->seek_table_template);
 		e->seek_table_template = 0;
 	}
-
+//_WIN32_internal_buffer_version
+#if 0
+#else
 	if(e->output_buffer) {
 		free(e->output_buffer);
 		e->output_buffer = 0;
 	}
+#endif
 }
 
 int EncoderSession_finish_ok(EncoderSession *e, int info_align_carry, int info_align_zero, foreign_metadata_t *foreign_metadata, FLAC__bool error_on_compression_fail)
