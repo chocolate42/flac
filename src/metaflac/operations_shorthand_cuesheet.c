@@ -1,6 +1,6 @@
 /* metaflac - Command-line FLAC metadata editor
  * Copyright (C) 2001-2009  Josh Coalson
- * Copyright (C) 2011-2022  Xiph.Org Foundation
+ * Copyright (C) 2011-2023  Xiph.Org Foundation
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -69,6 +69,12 @@ FLAC__bool do_shorthand_operation__cuesheet(const char *filename, FLAC__Metadata
 		return false;
 	}
 
+	if(sample_rate == 0) {
+		flac_fprintf(stderr, "%s: ERROR: cannot parse cuesheet when sample rate is unknown\n", filename);
+		FLAC__metadata_iterator_delete(iterator);
+		return false;
+	}
+
 	switch(operation->type) {
 		case OP__IMPORT_CUESHEET_FROM:
 			if(0 != cuesheet) {
@@ -122,11 +128,9 @@ FLAC__bool import_cs_from(const char *filename, FLAC__StreamMetadata **cuesheet,
 		flac_fprintf(stderr, "%s: ERROR: empty import file name\n", filename);
 		return false;
 	}
-#ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
 	if(0 == strcmp(cs_filename, "-"))
 		f = stdin;
 	else
-#endif
 		f = flac_fopen(cs_filename, "r");
 
 	if(0 == f) {
@@ -146,6 +150,7 @@ FLAC__bool import_cs_from(const char *filename, FLAC__StreamMetadata **cuesheet,
 
 	if(!FLAC__format_cuesheet_is_legal(&(*cuesheet)->data.cue_sheet, /*check_cd_da_subset=*/false, &error_message)) {
 		flac_fprintf(stderr, "%s: ERROR parsing cuesheet \"%s\": %s\n", filename, cs_filename, error_message);
+		FLAC__metadata_object_delete(*cuesheet);
 		return false;
 	}
 
@@ -211,6 +216,11 @@ FLAC__bool export_cs_to(const char *filename, const FLAC__StreamMetadata *cueshe
 
 	if(f != stdout)
 		fclose(f);
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+	/* Delete output file when fuzzing */
+	if(f != stdout)
+		flac_unlink(cs_filename);
+#endif
 
 	return true;
 }

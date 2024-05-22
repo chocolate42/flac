@@ -1,6 +1,6 @@
 /* metaflac - Command-line FLAC metadata editor
  * Copyright (C) 2001-2009  Josh Coalson
- * Copyright (C) 2011-2022  Xiph.Org Foundation
+ * Copyright (C) 2011-2023  Xiph.Org Foundation
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -33,7 +33,7 @@ static void usage_header(FILE *out)
 	fprintf(out, "==============================================================================\n");
 	fprintf(out, "metaflac - Command-line FLAC metadata editor version %s\n", FLAC__VERSION_STRING);
 	fprintf(out, "Copyright (C) 2001-2009  Josh Coalson\n");
-	fprintf(out, "Copyright (C) 2011-2022  Xiph.Org Foundation\n");
+	fprintf(out, "Copyright (C) 2011-2023  Xiph.Org Foundation\n");
 	fprintf(out, "\n");
 	fprintf(out, "This program is free software; you can redistribute it and/or\n");
 	fprintf(out, "modify it under the terms of the GNU General Public License\n");
@@ -62,7 +62,9 @@ static void usage_summary(FILE *out)
 	fprintf(out, "Options:\n");
 	fprintf(out, "--preserve-modtime    Preserve the original modification time in spite of edits\n");
 	fprintf(out, "--with-filename       Prefix each output line with the FLAC file name\n");
-	fprintf(out, "                      (the default if more than one FLAC file is specified)\n");
+	fprintf(out, "                      (the default if more than one FLAC file is specified).\n");
+	fprintf(out, "                      This option has no effect for options exporting to a\n");
+	fprintf(out, "                      file, like --export-tags-to.\n");
 	fprintf(out, "--no-filename         Do not prefix each output line with the FLAC file name\n");
 	fprintf(out, "                      (the default if only one FLAC file is specified)\n");
 	fprintf(out, "--no-utf8-convert     Do not convert tags from UTF-8 to local charset,\n");
@@ -289,6 +291,16 @@ int long_usage(const char *message, ...)
 	fprintf(out, "    contents instead using --application-data-format=hexdump\n");
 	fprintf(out, "\n");
 	fprintf(out, "--append\n");
+	fprintf(out, "    Insert a metadata block from a file. This must be a binary block as\n");
+	fprintf(out, "    exported with --list --data-format=binary. The insertion point is\n");
+	fprintf(out, "    defined with --block-number=#.  The new block will be added after the\n");
+	fprintf(out, "    given block number.  This prevents the illegal insertion of a block\n");
+	fprintf(out, "    before the first STREAMINFO block.  You may not --append another\n");
+	fprintf(out, "    STREAMINFO block. It is possible to copy a metadata block from one\n");
+	fprintf(out, "    file to another with this option. For example use\n");
+	fprintf(out, "    metaflac --list --data-format=binary --block-number=6 file.flac > block\n");
+	fprintf(out, "    to export the block, and then import it with\n");
+	fprintf(out, "    metaflac --append anotherfile.flac < block\n");
 	fprintf(out, "    Insert a metadata block from a file.  The input file must be in the same\n");
 	fprintf(out, "    format as generated with --list.\n");
 	fprintf(out, "\n");

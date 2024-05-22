@@ -1,6 +1,6 @@
 #  FLAC - Free Lossless Audio Codec
 #  Copyright (C) 2001-2009  Josh Coalson
-#  Copyright (C) 2011-2022  Xiph.Org Foundation
+#  Copyright (C) 2011-2023  Xiph.Org Foundation
 #
 #  This file is part the FLAC project.  FLAC is comprised of several
 #  components distributed under different licenses.  The codec libraries
@@ -20,7 +20,7 @@
 # instead of FLAC__ since autoconf triggers off 'AC_' in strings
 
 AC_PREREQ(2.60)
-AC_INIT([flac],[1.4.2],[flac-dev@xiph.org],[flac],[https://www.xiph.org/flac/])
+AC_INIT([flac],[1.4.3],[flac-dev@xiph.org],[flac],[https://www.xiph.org/flac/])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_SRCDIR([src/flac/main.c])
 AC_CONFIG_MACRO_DIR([m4])
@@ -79,7 +79,7 @@ AC_DEFINE_UNQUOTED(CPU_IS_LITTLE_ENDIAN, ${ac_cv_c_little_endian},
 AC_DEFINE_UNQUOTED(WORDS_BIGENDIAN, ${ac_cv_c_big_endian},
 					[Target processor is big endian.])
 
-AC_ARG_ENABLE(asm-optimizations, AS_HELP_STRING([--disable-asm-optimizations],[Do not use any CPU specific optimization routines]), asm_opt=no, asm_opt=yes)
+AC_ARG_ENABLE(asm-optimizations, AS_HELP_STRING([--disable-asm-optimizations],[Do not use any CPU specific optimization routines]), asm_opt=${enableval}, asm_opt=yes)
 AM_CONDITIONAL(FLaC__NO_ASM, test "x$asm_opt" = xno)
 if test "x$asm_opt" = xno ; then
 AC_DEFINE(FLAC__NO_ASM)
@@ -176,10 +176,12 @@ os_is_windows=no
 case "$host" in
 	*mingw*)
 		os_is_windows=yes
+		AC_CHECK_TOOL(RC,[windres],[:])
 		;;
 esac
 
 AM_CONDITIONAL(OS_IS_WINDOWS, test "x$os_is_windows" = xyes)
+AM_CONDITIONAL(HAVE_WINDRES, test "x$RC" != "x:")
 
 case "$host" in
 	*-linux-*)
@@ -265,12 +267,12 @@ esac
 
 
 AC_ARG_ENABLE(64-bit-words,
-	AS_HELP_STRING([--enable-64-bit-words],[Set FLAC__BYTES_PER_WORD to 8 (4 is the default)]))
-if test "x$enable_64_bit_words" = xyes ; then
-	AC_DEFINE_UNQUOTED([ENABLE_64_BIT_WORDS],1,[Set FLAC__BYTES_PER_WORD to 8 (4 is the default)])
+	AS_HELP_STRING([--disable-64-bit-words],[Set FLAC__BYTES_PER_WORD to 4 (8 is the default)]))
+if test "x$enable_64_bit_words" = xno ; then
+	AC_DEFINE_UNQUOTED([ENABLE_64_BIT_WORDS],0,[Set FLAC__BYTES_PER_WORD to 8 (this is the default)])
 else
-	AC_DEFINE_UNQUOTED([ENABLE_64_BIT_WORDS],0)
-	fi
+	AC_DEFINE_UNQUOTED([ENABLE_64_BIT_WORDS],1)
+fi
 AC_SUBST(ENABLE_64_BIT_WORDS)
 
 AC_ARG_ENABLE(valgrind-testing,
@@ -369,6 +371,25 @@ AC_ARG_ENABLE([version-from-git],
 	AS_HELP_STRING([--disable-version-from-git], [Do not use git tag, commit hash and commit date for version number]),
        [ enable_version_from_git=$enableval ], [ enable_version_from_git=yes ])
 
+dnl Build with multithreading?
+AC_ARG_ENABLE([multithreading],
+	AS_HELP_STRING([--disable-multithreading], [Disable multithreading in libFLAC]))
+
+HAVE_PTHREAD=no
+if test "x$enable_multithreading" != "xno" ; then
+	AX_PTHREAD([
+		HAVE_PTHREAD=yes
+		AC_DEFINE(HAVE_PTHREAD,1,[Define if pthread is enabled])
+		LIBS="$PTHREAD_LIBS $LIBS"
+		CFLAGS="$CFLAGS $PTHREAD_CFLAGS"
+		CXXFLAGS="$CXXFLAGS $PTHREAD_CFLAGS"
+		CC="$PTHREAD_CC"
+		CXX="$PTHREAD_CXX"
+		],[HAVE_PTHREAD=no])
+	if test "x${HAVE_PTHREAD}" == "xno"; then
+		AC_MSG_WARN("pthread support, needed for multithreading, is not found")
+	fi
+fi
 
 dnl check for i18n(internationalization); these are from libiconv/gettext
 AM_ICONV
@@ -595,6 +616,7 @@ fi
 	echo "    Compiler is Clang : ....................... ${xiph_cv_c_compiler_clang}"
 	echo "    Asm optimizations : ....................... ${asm_optimisation}"
 	echo "    Ogg/FLAC support : ........................ ${have_ogg}"
+	echo "    Multithreading   : ........................ ${HAVE_PTHREAD}"
 	echo "    Stack protector  : ........................ ${enable_stack_smash_protection}"
 	echo "    Fuzzing support (Clang only) : ............ ${have_oss_fuzzers}"
 echo

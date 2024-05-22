@@ -1,4 +1,4 @@
-% flac(1) Version 1.4.2 | Free Lossless Audio Codec conversion tool
+% flac(1) Version 1.4.3 | Free Lossless Audio Codec conversion tool
 
 # NAME
 
@@ -42,7 +42,7 @@ the convention is that FLAC files have the extension ".flac"
 Before going into the full command-line description, a few other things
 help to sort it out:
 1. flac encodes by default, so you must use -d to decode
-2. the options -0 .. -8 (or --fast and --best) that control the
+2. the options -0 .. -8 (or \--fast and \--best) that control the
    compression level actually are just synonyms for different groups of
    specific encoding options (described later) and you can get the same
    effect by using the same options. When specific options are specified
@@ -66,7 +66,7 @@ the desired operation on each input file to similarly named output files
 (meaning for encoding, the extension will be replaced with ".flac", or
 appended with ".flac" if the input file has no extension, and for
 decoding, the extension will be ".wav" for WAVE output and ".raw" for raw
-output). The original file is not deleted unless --delete-input-file is
+output). The original file is not deleted unless \--delete-input-file is
 specified.
 
 If you are encoding/decoding from stdin to a file, you should use the -o
@@ -85,7 +85,7 @@ RIFF WAVE header contents when necessary.
 
 Also, you can force output data to go to stdout using -c.
 
-To encode or decode files that start with a dash, use -- to signal the
+To encode or decode files that start with a dash, use \-- to signal the
 end of options, to keep the filenames themselves from being treated as
 options:
 
@@ -154,7 +154,7 @@ Some common **encoding** tasks using flac:
 `flac abc.flac --force`
 :	This one's a little tricky: notice that flac is in encode mode by
 	default (you have to specify -d to decode) so this command actually
-	recompresses abc.flac back to abc.flac. --force is needed to make
+	recompresses abc.flac back to abc.flac. \--force is needed to make
 	sure you really want to overwrite abc.flac with a new version. Why
 	would you want to do this? It allows you to recompress an existing
 	FLAC file with (usually) higher compression options or a newer
@@ -167,16 +167,19 @@ Some common **decoding** tasks using flac:
 	-d it means re-encode abc.flac to abc.flac (see above).
 
 `flac -d --force-aiff-format abc.flac`  
+
 `flac -d -o abc.aiff abc.flac`
 :	Two different ways of decoding abc.flac to abc.aiff (AIFF format).
 	abc.flac is not deleted.
 
 `flac -d --force-rf64-format abc.flac`  
+
 `flac -d -o abc.rf64 abc.flac`
 :	Two different ways of decoding abc.flac to abc.rf64 (RF64 format).
 	abc.flac is not deleted.
 
 `flac -d --force-wave64-format abc.flac`  
+
 `flac -d -o abc.w64 abc.flac`
 :	Two different ways of decoding abc.flac to abc.w64 (Wave64 format).
 	abc.flac is not deleted.
@@ -206,7 +209,9 @@ the HTML documentation.
 :	Decode (the default behavior is to encode)
 
 **-t, \--test**
-:	Test a flac encoded file (same as -d except no decoded file is written)
+:	Test a flac encoded file. This works the same as -d except no
+	decoded file is written, with some additional checks like parsing
+	of all metadata blocks.
 
 **-a, \--analyze**
 :	Analyze a FLAC encoded file (same as -d except an analysis file is
@@ -355,6 +360,15 @@ the HTML documentation.
 	option in combination with custom encoding options meant for
 	archival.
 
+**-j** *\#***, \--threads=***\#*  
+:	Try to set a maximum number of threads to use for encoding. If
+	multithreading was not enabled on compilation or when setting a
+	number of threads that is too high, this fails with a warning. The
+	value of 0 is currently equal to 1 thread (i.e. no multithreading)
+	but may mean something else in the future. Currently the maximum
+	supported number of threads is 128. Using a value higher than the
+	number of available CPU threads harms performance.
+
 **\--replay-gain**
 :	Calculate ReplayGain values and store them as FLAC tags, similar to
 	vorbisgain. Title gains/peaks will be computed for each input file,
@@ -383,11 +397,6 @@ the HTML documentation.
 	characters. Some parts may be left empty to invoke default values.
 	FILENAME is just shorthand for "\|\|\|\|FILENAME". For the format of
 	SPECIFICATION, see the section **picture specification**.
-
-**\--sector-align**
-:	Align encoding of multiple CD format files on sector boundaries. See the
-	HTML documentation for more information. This option is DEPRECATED and
-	may not exist in future versions of flac.
 
 **\--ignore-chunk-sizes**
 :	When encoding to flac, ignore the file size headers in WAV and AIFF
@@ -553,14 +562,14 @@ the HTML documentation.
 	ends with *.aif* or *.aiff*, *.rf64* and *.w64* respectively. Also,
 	this option has no effect when encoding since input is
 	auto-detected. When none of these options nor 
-	--keep-foreign-metadata are given and no output filename is set,
+	\--keep-foreign-metadata are given and no output filename is set,
 	the output format is WAV by default.
 
 **\--force-legacy-wave-format**  
 **\--force-extensible-wave-format**
 :	Instruct the decoder to output a WAVE file with WAVE_FORMAT_PCM and
 	WAVE_FORMAT_EXTENSIBLE respectively. If none of these options nor
-	--keep-foreign-metadata are given, FLAC outputs WAVE_FORMAT_PCM
+	\--keep-foreign-metadata are given, FLAC outputs WAVE_FORMAT_PCM
 	for mono or stereo with a bit depth of 8 or 16 bits, and
 	WAVE_FORMAT_EXTENSIBLE for all other audio formats.
 
@@ -587,7 +596,6 @@ the HTML documentation.
 **\--no-replay-gain**  
 **\--no-residual-gnuplot**  
 **\--no-residual-text**  
-**\--no-sector-align**  
 **\--no-seektable**  
 **\--no-silent**  
 **\--no-verify**  
@@ -721,7 +729,7 @@ yield sane results. If necessary, an overlap can be specified, as can be
 the taper parameter, for example partial_tukey(2/0.2) or
 partial_tukey(2/0.2/0.5). ov should be smaller than 1 and can be
 negative. The use of this is that different parts of a block are ignored
-as the might contain transients which are hard to predict anyway. The
+as they might contain transients which are hard to predict anyway. The
 encoder will try each different added apodization (each covering a
 different part of the block) to see which resulting predictor results in
 the smallest representation.

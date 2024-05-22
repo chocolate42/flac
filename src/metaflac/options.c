@@ -1,6 +1,6 @@
 /* metaflac - Command-line FLAC metadata editor
  * Copyright (C) 2001-2009  Josh Coalson
- * Copyright (C) 2011-2022  Xiph.Org Foundation
+ * Copyright (C) 2011-2023  Xiph.Org Foundation
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -251,8 +251,11 @@ FLAC__bool parse_options(int argc, char *argv[], CommandLineOptions *options)
 		Operation *op = find_shorthand_operation(options, OP__IMPORT_CUESHEET_FROM);
 		if(0 != op) {
 			Operation *op2 = find_shorthand_operation(options, OP__ADD_SEEKPOINT);
-			if(0 == op2)
+			if(0 == op2) {
 				op2 = append_shorthand_operation(options, OP__ADD_SEEKPOINT);
+				/* Need to re-find op, because the appending might have caused realloc */
+				op = find_shorthand_operation(options, OP__IMPORT_CUESHEET_FROM);
+			}
 			op->argument.import_cuesheet_from.add_seekpoint_link = &(op2->argument.add_seekpoint);
 		}
 	}

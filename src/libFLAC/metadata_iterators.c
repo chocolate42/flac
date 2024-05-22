@@ -1,6 +1,6 @@
 /* libFLAC - Free Lossless Audio Codec library
  * Copyright (C) 2001-2009  Josh Coalson
- * Copyright (C) 2011-2022  Xiph.Org Foundation
+ * Copyright (C) 2011-2023  Xiph.Org Foundation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -2343,7 +2343,7 @@ FLAC__Metadata_SimpleIteratorStatus read_metadata_block_data_vorbis_comment_entr
 	if(max_length < entry->length) {
 		entry->length = 0;
 		return FLAC__METADATA_SIMPLE_ITERATOR_STATUS_BAD_METADATA;
-	} else max_length -= entry->length;
+	}
 
 	if(0 != entry->entry)
 		free(entry->entry);
@@ -2518,7 +2518,7 @@ FLAC__Metadata_SimpleIteratorStatus read_metadata_block_data_cuesheet_cb_(FLAC__
 	block->num_tracks = unpack_uint32_(buffer, len);
 
 	if(block->num_tracks == 0) {
-		block->tracks = 0;
+		return FLAC__METADATA_SIMPLE_ITERATOR_STATUS_BAD_METADATA;
 	}
 	else if(0 == (block->tracks = calloc(block->num_tracks, sizeof(FLAC__StreamMetadata_CueSheet_Track))))
 		return FLAC__METADATA_SIMPLE_ITERATOR_STATUS_MEMORY_ALLOCATION_ERROR;

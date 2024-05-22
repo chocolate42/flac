@@ -1,6 +1,6 @@
 /* metaflac - Command-line FLAC metadata editor
  * Copyright (C) 2001-2009  Josh Coalson
- * Copyright (C) 2011-2022  Xiph.Org Foundation
+ * Copyright (C) 2011-2023  Xiph.Org Foundation
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -197,6 +197,7 @@ FLAC__bool do_major_operation__list(const char *filename, FLAC__Metadata_Chain *
 				FLAC__byte * block_raw = FLAC__metadata_object_get_raw(block);
 				if(block_raw == 0) {
 					flac_fprintf(stderr, "%s: ERROR: couldn't get block in raw form\n", filename);
+					FLAC__metadata_iterator_delete(iterator);
 					return false;
 				}
 				write_metadata_binary(block, block_raw, options->data_format_is_binary_headerless);
@@ -264,6 +265,8 @@ FLAC__bool do_major_operation__append(FLAC__Metadata_Chain *chain, const Command
 
 		buffer_size = ((FLAC__uint32)(header[1]) << 16) + ((FLAC__uint32)(header[2]) << 8) + header[3];
 		buffer = safe_malloc_(buffer_size + FLAC__STREAM_METADATA_HEADER_LENGTH);
+		if(0 == buffer)
+			die("out of memory allocating read buffer");
 		memcpy(buffer, header, FLAC__STREAM_METADATA_HEADER_LENGTH);
 
 		num_objects++;

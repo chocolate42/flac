@@ -1,6 +1,6 @@
 /* flac - Command-line FLAC encoder/decoder
  * Copyright (C) 2000-2009  Josh Coalson
- * Copyright (C) 2011-2022  Xiph.Org Foundation
+ * Copyright (C) 2011-2023  Xiph.Org Foundation
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -66,6 +66,7 @@ typedef struct {
 
 	FLAC__uint64 samples_processed;
 	uint32_t frame_counter;
+	FLAC__FrameHeader prev_frameheader; /* Header of previously decoded frame */
 	FLAC__bool abort_flag;
 	FLAC__bool aborting_due_to_until; /* true if we intentionally abort decoding prematurely because we hit the --until point */
 	FLAC__bool aborting_due_to_unparseable; /* true if we abort decoding because we hit an unparseable frame */
@@ -94,7 +95,8 @@ typedef struct {
 	foreign_metadata_t *foreign_metadata; /* NULL unless --keep-foreign-metadata requested */
 	FLAC__off_t fm_offset1, fm_offset2, fm_offset3;
 
-	clock_t old_clock_t;
+	clock_t old_clock;
+	FLAC__uint64 old_samples_processed;
 } DecoderSession;
 
 
@@ -226,6 +228,7 @@ FLAC__bool DecoderSession_construct(DecoderSession *d, FLAC__bool is_ogg, FLAC__
 
 	d->samples_processed = 0;
 	d->frame_counter = 0;
+	memset(&(d->prev_frameheader), 0, sizeof(FLAC__FrameHeader));
 	d->abort_flag = false;
 	d->aborting_due_to_until = false;
 	d->aborting_due_to_unparseable = false;
@@ -242,7 +245,7 @@ FLAC__bool DecoderSession_construct(DecoderSession *d, FLAC__bool is_ogg, FLAC__
 	d->has_md5sum = false;
 	d->bps = 0;
 	d->channels = 0;
-	d->sample_rate = 0;
+	d->sample_rate = UINT32_MAX;
 	d->channel_mask = 0;
 
 	d->decode_position = 0;
@@ -253,7 +256,8 @@ FLAC__bool DecoderSession_construct(DecoderSession *d, FLAC__bool is_ogg, FLAC__
 
 	d->foreign_metadata = foreign_metadata;
 
-	d->old_clock_t = 0;
+	d->old_clock = 0;
+	d->old_samples_processed = 0;
 
 	FLAC__ASSERT(!(d->test_only && d->analysis_mode));
 
@@ -297,7 +301,11 @@ void DecoderSession_destroy(DecoderSession *d, FLAC__bool error_occurred)
 		}
 #endif
 		fclose(d->fout);
+
+#ifndef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+	/* Always delete output file when fuzzing */
 		if(error_occurred)
+#endif
 			flac_unlink(d->outfilename);
 	}
 }
@@ -354,6 +362,9 @@ FLAC__bool DecoderSession_init_decoder(DecoderSession *decoder_session, const ch
 		for(i = 0; i < FLAC__FOREIGN_METADATA_NUMBER_OF_RECOGNIZED_APPLICATION_IDS; i++)
 			FLAC__stream_decoder_set_metadata_respond_application(decoder_session->decoder, (FLAC__byte *)FLAC__FOREIGN_METADATA_APPLICATION_ID[i]);
 	}
+
+	if(decoder_session->test_only)
+		FLAC__stream_decoder_set_metadata_respond_all(decoder_session->decoder);
 
 #if FLAC__HAS_OGG
 	if(decoder_session->is_ogg) {
@@ -586,7 +597,10 @@ int DecoderSession_finish_error(DecoderSession *d)
 FLAC__bool canonicalize_until_specification(utils__SkipUntilSpecification *spec, const char *inbasefilename, uint32_t sample_rate, FLAC__uint64 skip, FLAC__uint64 total_samples_in_input)
 {
 	/* convert from mm:ss.sss to sample number if necessary */
-	flac__utils_canonicalize_skip_until_specification(spec, sample_rate);
+	if(!flac__utils_canonicalize_skip_until_specification(spec, sample_rate)) {
+		flac__utils_printf(stderr, 1, "%s: ERROR, value of --until is too large\n", inbasefilename);
+		return false;
+	}
 
 	/* special case: if "--until=-0", use the special value '0' to mean "end-of-stream" */
 	if(spec->is_relative && spec->value.samples == 0) {
@@ -1095,7 +1109,7 @@ FLAC__StreamDecoderWriteStatus write_callback(const FLAC__StreamDecoder *decoder
 	DecoderSession *decoder_session = (DecoderSession*)client_data;
 	FILE *fout = decoder_session->fout;
 	const uint32_t bps = frame->header.bits_per_sample, channels = frame->header.channels;
-	const uint32_t shift = (decoder_session->format != FORMAT_RAW && (bps%8))? 8-(bps%8): 0;
+	const uint32_t shift = (bps%8)? 8-(bps%8): 0;
 	FLAC__bool is_big_endian = (
 		(decoder_session->format == FORMAT_AIFF || (decoder_session->format == FORMAT_AIFF_C && decoder_session->subformat == SUBFORMAT_AIFF_C_NONE)) ? true : (
 		decoder_session->format == FORMAT_WAVE || decoder_session->format == FORMAT_WAVE64 || decoder_session->format == FORMAT_RF64 || (decoder_session->format == FORMAT_AIFF_C && decoder_session->subformat == SUBFORMAT_AIFF_C_SOWT) ? false :
@@ -1140,6 +1154,10 @@ FLAC__StreamDecoderWriteStatus write_callback(const FLAC__StreamDecoder *decoder
 	else {
 		/* must not have gotten STREAMINFO, save the bps from the frame header */
 		FLAC__ASSERT(!decoder_session->got_stream_info);
+		if(decoder_session->format == FORMAT_RAW && ((decoder_session->bps % 8) != 0  || decoder_session->bps < 4)) {
+			flac__utils_printf(stderr, 1, "%s: ERROR: bits per sample is %u, must be 8/16/24/32 for raw format output\n", decoder_session->inbasefilename, decoder_session->bps);
+			return FLAC__STREAM_DECODER_WRITE_STATUS_ABORT;
+		}
 		decoder_session->bps = bps;
 	}
 
@@ -1161,7 +1179,7 @@ FLAC__StreamDecoderWriteStatus write_callback(const FLAC__StreamDecoder *decoder
 	}
 
 	/* sanity-check the sample rate */
-	if(!decoder_session->got_stream_info) {
+	if(decoder_session->sample_rate < UINT32_MAX) {
 		if(frame->header.sample_rate != decoder_session->sample_rate) {
 			if(decoder_session->got_stream_info)
 				flac__utils_printf(stderr, 1, "%s: ERROR, sample rate is %u in frame but %u in STREAMINFO\n", decoder_session->inbasefilename, frame->header.sample_rate, decoder_session->sample_rate);
@@ -1172,15 +1190,16 @@ FLAC__StreamDecoderWriteStatus write_callback(const FLAC__StreamDecoder *decoder
 		}
 	}
 	else {
+		/* must not have gotten STREAMINFO, save the sample rate from the frame header */
+		FLAC__ASSERT(!decoder_session->got_stream_info);
 		decoder_session->sample_rate = frame->header.sample_rate;
 	}
 
 	/*
 	 * limit the number of samples to accept based on --until
 	 */
-	FLAC__ASSERT(!decoder_session->skip_specification->is_relative);
 	/* if we never got the total_samples from the metadata, the skip and until specs would never have been canonicalized, so protect against that: */
-	if(decoder_session->skip_specification->is_relative) {
+	if(decoder_session->skip_specification->is_relative || !decoder_session->got_stream_info) {
 		if(decoder_session->skip_specification->value.samples == 0) /* special case for when no --skip was given */
 			decoder_session->skip_specification->is_relative = false; /* convert to our meaning of beginning-of-stream */
 		else {
@@ -1188,7 +1207,7 @@ FLAC__StreamDecoderWriteStatus write_callback(const FLAC__StreamDecoder *decoder
 			return FLAC__STREAM_DECODER_WRITE_STATUS_ABORT;
 		}
 	}
-	if(decoder_session->until_specification->is_relative) {
+	if(decoder_session->until_specification->is_relative || !decoder_session->got_stream_info) {
 		if(decoder_session->until_specification->value.samples == 0) /* special case for when no --until was given */
 			decoder_session->until_specification->is_relative = false; /* convert to our meaning of end-of-stream */
 		else {
@@ -1219,6 +1238,25 @@ FLAC__StreamDecoderWriteStatus write_callback(const FLAC__StreamDecoder *decoder
 		decoder_session->decode_position = dpos;
 	}
 
+	/* warn in case frame/sample number is incorrect, but only when decoding
+	 * through errors is not enabled */
+	if(!decoder_session->continue_through_decode_errors) {
+		if(decoder_session->prev_frameheader.channels > 0) {
+			FLAC__ASSERT(decoder_session->prev_frameheader.number_type == FLAC__FRAME_NUMBER_TYPE_SAMPLE_NUMBER);
+			FLAC__ASSERT(frame->header.number_type == FLAC__FRAME_NUMBER_TYPE_SAMPLE_NUMBER);
+			if(decoder_session->prev_frameheader.number.sample_number +
+			   decoder_session->prev_frameheader.blocksize !=
+			   frame->header.number.sample_number) {
+				flac__utils_printf(stderr, 1, "%s: WARNING: sample or frame number does not increase correctly, file might not be seekable\n", decoder_session->inbasefilename);
+				if(decoder_session->treat_warnings_as_errors) {
+					decoder_session->abort_flag = true;
+					return FLAC__STREAM_DECODER_WRITE_STATUS_ABORT;
+				}
+			}
+		}
+		memcpy(&(decoder_session->prev_frameheader), &(frame->header), sizeof(FLAC__FrameHeader));
+	}
+
 	if(wide_samples > 0) {
 		decoder_session->samples_processed += wide_samples;
 		decoder_session->frame_counter++;
@@ -1227,9 +1265,16 @@ FLAC__StreamDecoderWriteStatus write_callback(const FLAC__StreamDecoder *decoder
 		if(!(decoder_session->frame_counter & 0x1ff))
 			print_stats(decoder_session);
 #else
-		if((clock() - decoder_session->old_clock_t) > (CLOCKS_PER_SEC/4)) {
-			print_stats(decoder_session);
-			decoder_session->old_clock_t = clock();
+		if(decoder_session->samples_processed - decoder_session->old_samples_processed > 25000) {
+			/* We're assuming that even on old hardware libFLAC can easily process
+			 * 100.000 samples per second, even on old hardware. To limit the number
+			 * of (expensive) syscalls, we only check clock every 25.000 samples */
+			clock_t cur_clock = clock();
+			decoder_session->old_samples_processed = decoder_session->samples_processed;
+			if((cur_clock - decoder_session->old_clock) > (CLOCKS_PER_SEC/4)) {
+				print_stats(decoder_session);
+				decoder_session->old_clock = cur_clock;
+			}
 		}
 #endif
 
@@ -1452,7 +1497,11 @@ void metadata_callback(const FLAC__StreamDecoder *decoder, const FLAC__StreamMet
 		decoder_session->channels = metadata->data.stream_info.channels;
 		decoder_session->sample_rate = metadata->data.stream_info.sample_rate;
 
-		flac__utils_canonicalize_skip_until_specification(decoder_session->skip_specification, decoder_session->sample_rate);
+		if(!flac__utils_canonicalize_skip_until_specification(decoder_session->skip_specification, decoder_session->sample_rate)) {
+			flac__utils_printf(stderr, 1, "%s: ERROR, value of --skip is too large\n", decoder_session->inbasefilename);
+			decoder_session->abort_flag = true;
+			return;
+		}
 		FLAC__ASSERT(decoder_session->skip_specification->value.samples >= 0);
 		skip = (FLAC__uint64)decoder_session->skip_specification->value.samples;
 
@@ -1496,7 +1545,7 @@ void metadata_callback(const FLAC__StreamDecoder *decoder, const FLAC__StreamMet
 			return;
 		}
 	}
-	else if(metadata->type == FLAC__METADATA_TYPE_CUESHEET) {
+	else if(metadata->type == FLAC__METADATA_TYPE_CUESHEET && !decoder_session->test_only) {
 		/* remember, at this point, decoder_session->total_samples can be 0, meaning 'unknown' */
 		if(decoder_session->total_samples == 0) {
 			flac__utils_printf(stderr, 1, "%s: ERROR can't use --cue when FLAC metadata has total sample count of 0\n", decoder_session->inbasefilename);
@@ -1519,11 +1568,18 @@ void metadata_callback(const FLAC__StreamDecoder *decoder, const FLAC__StreamMet
 
 		decoder_session->total_samples = decoder_session->until_specification->value.samples - decoder_session->skip_specification->value.samples;
 	}
-	else if(metadata->type == FLAC__METADATA_TYPE_VORBIS_COMMENT) {
+	else if(metadata->type == FLAC__METADATA_TYPE_VORBIS_COMMENT && !decoder_session->test_only) {
 		if (decoder_session->replaygain.spec.apply) {
 			double reference, gain, peak;
 			if (!(decoder_session->replaygain.apply = grabbag__replaygain_load_from_vorbiscomment(metadata, decoder_session->replaygain.spec.use_album_gain, /*strict=*/false, &reference, &gain, &peak))) {
 				flac__utils_printf(stderr, 1, "%s: WARNING: can't get %s (or even %s) ReplayGain tags\n", decoder_session->inbasefilename, decoder_session->replaygain.spec.use_album_gain? "album":"track", decoder_session->replaygain.spec.use_album_gain? "track":"album");
+				if(decoder_session->treat_warnings_as_errors) {
+					decoder_session->abort_flag = true;
+					return;
+				}
+			}
+			else if(decoder_session->bps == 0) {
+				flac__utils_printf(stderr, 1, "%s: WARNING: can't apply ReplayGain, bit-per-sample value is invalid\n", decoder_session->inbasefilename);
 				if(decoder_session->treat_warnings_as_errors) {
 					decoder_session->abort_flag = true;
 					return;
@@ -1542,7 +1598,7 @@ void metadata_callback(const FLAC__StreamDecoder *decoder, const FLAC__StreamMet
 		}
 		(void)flac__utils_get_channel_mask_tag(metadata, &decoder_session->channel_mask);
 	}
-	else if(metadata->type == FLAC__METADATA_TYPE_APPLICATION && decoder_session->warn_user_about_foreign_metadata) {
+	else if(metadata->type == FLAC__METADATA_TYPE_APPLICATION && decoder_session->warn_user_about_foreign_metadata && !decoder_session->test_only) {
 		/* Foreign metadata signalling */
 		flac__utils_printf(stderr, 1, "%s: WARNING: found foreign metadata, use --keep-foreign-metadata to restore\n", decoder_session->inbasefilename);
 		decoder_session->warn_user_about_foreign_metadata = false;

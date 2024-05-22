@@ -1,5 +1,5 @@
 /* fuzzer_encoder_v2
- * Copyright (C) 2022  Xiph.Org Foundation
+ * Copyright (C) 2022-2023  Xiph.Org Foundation
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -54,6 +54,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	FLAC__bool encoder_valid = true;
 	FLAC__StreamEncoder *encoder = 0;
 	FLAC__StreamEncoderState state;
+	const char* state_string = "";
 	FLAC__StreamMetadata *metadata[16] = {NULL};
 	unsigned num_metadata = 0;
 	FLAC__StreamMetadata_VorbisComment_Entry VorbisCommentField;
@@ -76,8 +77,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
 	/* allocate the encoder */
 	if((encoder = FLAC__stream_encoder_new()) == NULL) {
-		fprintf(stderr, "ERROR: allocating encoder\n");
-		return 1;
+		return 0;
 	}
 
 	/* Use first 20 byte for configuration */
@@ -121,6 +121,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	encoder_valid &= FLAC__stream_encoder_set_total_samples_estimate(encoder, samples_estimate);
 	encoder_valid &= FLAC__stream_encoder_disable_instruction_set(encoder, instruction_set_disable_mask);
 	encoder_valid &= FLAC__stream_encoder_set_limit_min_bitrate(encoder, data_bools[15]);
+	encoder_valid &= (FLAC__stream_encoder_set_num_threads(encoder,data[9]) == FLAC__STREAM_ENCODER_SET_NUM_THREADS_OK); /* reuse data[9] */
 
 	/* Set compression related parameters */
 	encoder_valid &= FLAC__stream_encoder_set_compression_level(encoder, compression_level);
@@ -320,6 +321,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	}
 
 	state = FLAC__stream_encoder_get_state(encoder);
+	state_string = FLAC__stream_encoder_get_resolved_state_string(encoder);
 	if(!(state == FLAC__STREAM_ENCODER_OK ||
 	     state == FLAC__STREAM_ENCODER_UNINITIALIZED ||
 	     state == FLAC__STREAM_ENCODER_CLIENT_ERROR ||
